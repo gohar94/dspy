@@ -66,6 +66,12 @@ class Module(BaseModule, metaclass=ProgramMeta):
     @with_callbacks
     def __call__(self, *args, **kwargs) -> Prediction:
         caller_modules = settings.caller_modules or []
+
+        # Reset judge counter at the top-level module call
+        if not caller_modules or len(caller_modules) == 0:
+            from dspy.dsp.utils.settings import reset_judge_calls
+            reset_judge_calls()
+
         caller_modules = list(caller_modules)
         caller_modules.append(self)
 
@@ -83,6 +89,12 @@ class Module(BaseModule, metaclass=ProgramMeta):
     @with_callbacks
     async def acall(self, *args, **kwargs) -> Prediction:
         caller_modules = settings.caller_modules or []
+
+        # Reset judge counter at the top-level module call
+        if not caller_modules or len(caller_modules) == 0:
+            from dspy.dsp.utils.settings import reset_judge_calls
+            reset_judge_calls()
+
         caller_modules = list(caller_modules)
         caller_modules.append(self)
 

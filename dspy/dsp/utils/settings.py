@@ -28,6 +28,11 @@ DEFAULT_CONFIG = dotdict(
     allow_tool_async_sync_conversion=False,
     max_history_size=10000,
     max_trace_size=10000,
+    # Judge model configuration
+    judge_lm=None,                    # Judge LM instance
+    enable_judge=False,               # Enable/disable judge feature
+    max_judge_calls_per_request=5,    # Max judge calls per complete request
+    judge_feedback_field="judge_feedback",  # Field name for feedback
 )
 
 # Global base configuration and owner tracking
@@ -39,6 +44,7 @@ config_owner_async_task = None
 global_lock = threading.Lock()
 
 thread_local_overrides = contextvars.ContextVar("context_overrides", default=dotdict())
+judge_call_counter = contextvars.ContextVar("judge_call_counter", default=0)
 
 
 class Settings:
@@ -187,3 +193,21 @@ class Settings:
 
 
 settings = Settings()
+
+
+# Judge call counter helper functions
+def increment_judge_calls():
+    """Increment the judge call counter and return the new count."""
+    count = judge_call_counter.get()
+    judge_call_counter.set(count + 1)
+    return count + 1
+
+
+def reset_judge_calls():
+    """Reset the judge call counter to 0."""
+    judge_call_counter.set(0)
+
+
+def get_judge_calls():
+    """Get the current judge call count."""
+    return judge_call_counter.get()

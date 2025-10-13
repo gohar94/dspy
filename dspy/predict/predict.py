@@ -6,7 +6,8 @@ from pydantic import BaseModel
 from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.clients.base_lm import BaseLM
 from dspy.clients.lm import LM
-from dspy.dsp.utils.settings import settings
+from dspy.dsp.utils.settings import get_judge_calls, increment_judge_calls, settings
+from dspy.predict.judge import Judge
 from dspy.predict.parameter import Parameter
 from dspy.primitives.module import Module
 from dspy.primitives.prediction import Prediction
@@ -181,30 +182,133 @@ class Predict(Module, Parameter):
 
     def forward(self, **kwargs):
         lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
-
         adapter = settings.adapter or ChatAdapter()
 
-        if self._should_stream():
-            with settings.context(caller_predict=self):
-                completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
-        else:
-            with settings.context(send_stream=None):
-                completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
+        # Judge retry loop
+        max_attempts = settings.max_judge_calls_per_request + 1 if settings.enable_judge else 1
+        attempt = 0
+        judge_feedback = None
 
-        return self._forward_postprocess(completions, signature, **kwargs)
+        while attempt < max_attempts:
+            # Add judge feedback to kwargs if available
+            if judge_feedback and settings.judge_feedback_field:
+                kwargs[settings.judge_feedback_field] = judge_feedback
+
+            # Make prediction
+            if self._should_stream():
+                with settings.context(caller_predict=self):
+                    completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
+            else:
+                with settings.context(send_stream=None):
+                    completions = adapter(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
+
+            pred = self._forward_postprocess(completions, signature, **kwargs)
+
+            # Check if we should judge this prediction
+            if not settings.enable_judge or not settings.judge_lm:
+                return pred
+
+            # Check if we've exceeded judge call limit
+            if get_judge_calls() >= settings.max_judge_calls_per_request:
+                return pred
+
+            # Call judge
+            judge_result = self._call_judge(signature, kwargs, pred)
+            increment_judge_calls()
+
+            # Check if correct
+            if judge_result.is_correct.lower() in ["yes", "true", "correct"]:
+                return pred
+
+            # Get feedback for retry
+            judge_feedback = judge_result.feedback
+            attempt += 1
+
+            # If last attempt, return anyway
+            if attempt >= max_attempts:
+                return pred
+
+        return pred
+
+    def _call_judge(self, signature, inputs, prediction):
+        """Call the judge model to evaluate the prediction."""
+        # Format instruction from signature
+        instruction = f"Task: {signature.instructions}\nInputs: {inputs}"
+
+        # Format prediction
+        pred_str = str(prediction)
+
+        # Create judge instance with judge LM
+        with settings.context(lm=settings.judge_lm, enable_judge=False):
+            judge = Judge()
+            result = judge(instruction=instruction, prediction=pred_str)
+
+        return result
+
+    async def _acall_judge(self, signature, inputs, prediction):
+        """Async call to the judge model to evaluate the prediction."""
+        # Format instruction from signature
+        instruction = f"Task: {signature.instructions}\nInputs: {inputs}"
+
+        # Format prediction
+        pred_str = str(prediction)
+
+        # Create judge instance with judge LM
+        with settings.context(lm=settings.judge_lm, enable_judge=False):
+            judge = Judge()
+            result = await judge.aforward(instruction=instruction, prediction=pred_str)
+
+        return result
 
     async def aforward(self, **kwargs):
         lm, config, signature, demos, kwargs = self._forward_preprocess(**kwargs)
-
         adapter = settings.adapter or ChatAdapter()
-        if self._should_stream():
-            with settings.context(caller_predict=self):
-                completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
-        else:
-            with settings.context(send_stream=None):
-                completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
 
-        return self._forward_postprocess(completions, signature, **kwargs)
+        # Judge retry loop
+        max_attempts = settings.max_judge_calls_per_request + 1 if settings.enable_judge else 1
+        attempt = 0
+        judge_feedback = None
+
+        while attempt < max_attempts:
+            # Add judge feedback to kwargs if available
+            if judge_feedback and settings.judge_feedback_field:
+                kwargs[settings.judge_feedback_field] = judge_feedback
+
+            # Make prediction
+            if self._should_stream():
+                with settings.context(caller_predict=self):
+                    completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
+            else:
+                with settings.context(send_stream=None):
+                    completions = await adapter.acall(lm, lm_kwargs=config, signature=signature, demos=demos, inputs=kwargs)
+
+            pred = self._forward_postprocess(completions, signature, **kwargs)
+
+            # Check if we should judge this prediction
+            if not settings.enable_judge or not settings.judge_lm:
+                return pred
+
+            # Check if we've exceeded judge call limit
+            if get_judge_calls() >= settings.max_judge_calls_per_request:
+                return pred
+
+            # Call judge
+            judge_result = await self._acall_judge(signature, kwargs, pred)
+            increment_judge_calls()
+
+            # Check if correct
+            if judge_result.is_correct.lower() in ["yes", "true", "correct"]:
+                return pred
+
+            # Get feedback for retry
+            judge_feedback = judge_result.feedback
+            attempt += 1
+
+            # If last attempt, return anyway
+            if attempt >= max_attempts:
+                return pred
+
+        return pred
 
     def update_config(self, **kwargs):
         self.config = {**self.config, **kwargs}
