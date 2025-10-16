@@ -29,10 +29,8 @@ DEFAULT_CONFIG = dotdict(
     max_history_size=10000,
     max_trace_size=10000,
     # Judge model configuration
-    judge_lm=None,                    # Judge LM instance
-    enable_judge=False,               # Enable/disable judge feature
-    max_judge_calls_per_request=5,    # Max judge calls per complete request
-    judge_feedback_field="judge_feedback",  # Field name for feedback
+    judge_lm=None,
+    per_task_judge=False,
 )
 
 # Global base configuration and owner tracking
