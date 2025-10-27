@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class TaskDecompositionSignature(Signature):
-    """Break down a given instruction into a list of sub-tasks to make it easy to follow the instruction. Do not add any new tasks not contained in the original instruction or create any validation steps."""
+    """Break down a given instruction into a list of sub-tasks to make it easy to follow the instruction. Do not add any new tasks that are not contained in the original instruction and do not create any validation steps."""
 
     instruction = InputField(desc="The original complex instruction to break down")
     max_subtasks = InputField(desc="Maximum number of sub-tasks to create (may be less than the maximum if the instruction is not complex)")
@@ -31,12 +31,12 @@ class TaskDecompositionSignature(Signature):
 
 
 class SubTaskExecutionSignature(Signature):
-    """Execute a specific sub-task with context from previous sub-tasks."""
+    """Execute a specific sub-task with context from the original instruction."""
 
     original_instruction = InputField(desc="The original complex instruction")
     subtask = InputField(desc="The specific sub-task to execute")
-    feedback = InputField(desc="Feedback from previous attempts at the same sub-task (if any)")
-    previous_results = InputField(desc="Results from previous sub-tasks (if any)")
+    previous_attempt = InputField(desc="The previous (incorrect) attempt at the same sub-task (if any)", default=None)
+    previous_attempt_feedback = InputField(desc="Feedback on the previous attempt at the same sub-task (if any)", default=None)
     result = OutputField(desc="The result of executing this sub-task")
 
 
@@ -98,7 +98,7 @@ class SubTaskDecomposition(Module):
 
         return subtasks[:self.max_subtasks]  # Limit to max_subtasks
 
-    def _combine_results_with_llm(self, instruction: str, subtasks: list[str], results: list[str]) -> str:
+    def _combine_results(self, instruction: str, subtasks: list[str], results: list[str]) -> str:
         """Combine sub-task results into a coherent final answer."""
         if len(results) == 1:
             return results[0]
@@ -112,7 +112,7 @@ class SubTaskDecomposition(Module):
         # Try to synthesize a final answer
         synthesis_signature = Signature(
             "instruction, subtask_results -> final_answer",
-            "Given the original instruction and results from sub-tasks, provide a comprehensive final answer."
+            "Given the original instruction and results from sub-tasks, provide a concise final answer that follows the original instruction."
         )
 
         synthesizer = ChainOfThought(synthesis_signature)
@@ -126,18 +126,6 @@ class SubTaskDecomposition(Module):
         except Exception as e:
             logger.debug(f"Failed to synthesize final answer: {e}")
             return combined
-
-    def _combine_results(self, instruction: str, subtasks: list[str], results: list[str]) -> str:
-        """Combine sub-task results into a coherent final answer."""
-        if len(results) == 1:
-            return results[0]
-
-        combined = ""
-
-        for i, (subtask, result) in enumerate(zip(subtasks, results, strict=False)):
-            combined += f"{result}\n"
-
-        return combined
 
     async def aforward(self, instruction: str) -> Prediction:
         """Async version of forward method."""
@@ -164,15 +152,10 @@ class SubTaskDecomposition(Module):
         for i, subtask in enumerate(subtasks):
             logger.debug(f"Executing sub-task {i+1}/{len(subtasks)}: {subtask}")
 
-            # Prepare context from previous results
-            previous_results_text = "\n".join([
-                f"Sub-task {j+1}: {results[j]}"
-                for j in range(len(results))
-            ]) if results else "None"
-
             # Execute sub-task with retries
             subtask_success = False
-            feedback = None
+            previous_attempt = None
+            previous_attempt_feedback = None
             attempt = 0
 
             while attempt < self.max_retries_per_subtask and not subtask_success:
@@ -183,14 +166,15 @@ class SubTaskDecomposition(Module):
                 execution_result = await self.executor.aforward(
                     original_instruction=instruction,
                     subtask=subtask,
-                    feedback=feedback,
-                    previous_results=previous_results_text,
+                    previous_attempt=previous_attempt,
+                    previous_attempt_feedback=previous_attempt_feedback,
                 )
 
                 if settings.per_task_judge:
                     judge_result = await self.judge.aforward(
                         instruction=subtask,
-                        prediction=execution_result.result
+                        prediction=execution_result.result,
+                        context=instruction
                     )
 
                     # Check if the judge approves
@@ -214,7 +198,8 @@ class SubTaskDecomposition(Module):
                         logger.debug(f"Sub-task {i+1} rejected by judge: {judge_result.feedback}")
                         if attempt < self.max_retries_per_subtask:
                             logger.debug(f"Retrying sub-task {i+1} with feedback...")
-                            feedback = judge_result.feedback
+                            previous_attempt = execution_result.result
+                            previous_attempt_feedback = judge_result.feedback
                 else:
                     subtask_success = True
                     results.append(execution_result.result)
