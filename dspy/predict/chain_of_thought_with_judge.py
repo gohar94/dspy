@@ -23,7 +23,7 @@ class ChainOfThoughtWithJudge(Module):
     """
     A DSPy module that uses Chain of Thought to answer questions,
     then uses a judge to verify the answer quality.
-    
+
     If the judge rejects the answer, it retries with feedback for a configurable
     number of attempts.
     """
