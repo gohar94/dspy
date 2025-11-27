@@ -34,17 +34,19 @@ class ChainOfThoughtWithRankingJudgeAndFeedback(Module):
     6. If none are correct, retry with combined feedback
     """
 
-    def __init__(self, n: int = 3, max_retries: int = 2):
+    def __init__(self, n: int = 3, max_retries: int = 2, temperature: float = 1.0):
         """
         Initialize the ChainOfThoughtWithRankingJudgeAndFeedback module.
 
         Args:
             n: Number of responses to sample per round (default: 3)
             max_retries: Maximum number of retry rounds if judge fails (default: 2)
+            temperature: Temperature for the model (default: 1.0)
         """
         super().__init__()
         self.n = n
         self.max_retries = max_retries
+        self.temperature = temperature
 
         # Initialize the components
         self.chain_of_thought = ChainOfThought("instruction -> response")
@@ -58,8 +60,8 @@ class ChainOfThoughtWithRankingJudgeAndFeedback(Module):
         final_result = None
         execution_trace = []
         feedback_summary = None
+        remaining_retries = self.max_retries
 
-        remaining_retries = self.max_retries + 1
         while remaining_retries > 0:
             start = lm.kwargs.get("rollout_id", 0)
             rollout_ids = [start + i for i in range(self.n)]
@@ -69,13 +71,13 @@ class ChainOfThoughtWithRankingJudgeAndFeedback(Module):
             response_predictions = []
 
             for idx, rid in enumerate(rollout_ids):
-                lm_ = lm.copy(rollout_id=rid, temperature=0.6)
+                lm_ = lm.copy(rollout_id=rid, temperature=self.temperature)
                 cot = self.chain_of_thought.deepcopy()
                 cot.set_lm(lm_)
 
                 # Add feedback to instruction if we're retrying
                 current_instruction = instruction
-                if feedback_summary and remaining_retries < self.max_retries + 1:
+                if feedback_summary and remaining_retries < self.max_retries:
                     current_instruction = f"{instruction}\n\nFeedback from previous attempts: {feedback_summary}"
 
                 try:
@@ -96,97 +98,70 @@ class ChainOfThoughtWithRankingJudgeAndFeedback(Module):
                     seen.add(resp)
                     unique_responses.append(resp)
 
-            # If all responses are the same, judge just that one
-            if len(unique_responses) == 1:
-                logger.debug(f"All {self.n} responses were identical")
+            judge_results = await self.ranking_judge.aforward(
+                instruction=instruction,
+                predictions=unique_responses,
+            )
 
-                # Judge the response
-                if remaining_retries > 0:
-                    judge_results = await self.ranking_judge.aforward(
-                        instruction=instruction,
-                        predictions=unique_responses
-                    )
+            # Find the best response (lowest rank)
+            best_prediction_idx = 0
+            best_rank = float("inf")
+            is_best_correct = False
+            best_feedback = None
+            all_results = []
 
-                    # Get results for first (and only) prediction
-                    result_key = list(judge_results.keys())[0]
-                    judge_result = judge_results[result_key]
-                    is_correct = judge_result.get("is_correct", "no").lower() in ["yes", "true", "correct"]
-                    feedback = judge_result.get("feedback", "No feedback")
+            for idx, (resp, result) in enumerate(zip(unique_responses, judge_results.values())):
+                rank = result.get("rank", idx + 1)
+                is_correct = result.get("is_correct", "no").lower() in ["yes", "true", "correct"]
+                feedback = result.get("feedback", "No feedback")
 
-                    execution_trace.append({
-                        "round": self.max_retries - remaining_retries + 1,
-                        "attempts": len(responses),
-                        "unique_responses": len(unique_responses),
-                        "best_response": unique_responses[0],
-                        "judge_verdict": judge_result.get("is_correct"),
-                        "judge_rank": judge_result.get("rank", 1),
-                        "judge_feedback": feedback,
-                        "approved": is_correct
-                    })
+                all_results.append(
+                    {
+                        "response": resp,
+                        "rank": rank,
+                        "is_correct": result.get("is_correct", "no"),
+                        "feedback": feedback,
+                    }
+                )
 
-                    if is_correct:
-                        final_result = unique_responses[0]
-                        feedback_summary = feedback
-                        break
-                    else:
-                        feedback_summary = feedback
+                if rank < best_rank:
+                    best_rank = rank
+                    best_prediction_idx = idx
+                    is_best_correct = is_correct
+                    best_feedback = feedback
+
+            execution_trace.append(
+                {
+                    "round": self.max_retries - remaining_retries + 1,
+                    "attempts": len(responses),
+                    "unique_responses": len(unique_responses),
+                    "best_response": unique_responses[best_prediction_idx],
+                    "judge_verdict": "correct" if is_best_correct else "incorrect",
+                    "judge_rank": best_rank,
+                    "judge_feedback": best_feedback,
+                    "approved": is_best_correct,
+                    "all_results": all_results,
+                }
+            )
+
+            if is_best_correct:
+                final_result = unique_responses[best_prediction_idx]
+                # For a single response, just use that feedback; for multiple,
+                # it's still reasonable to carry forward the best response's feedback.
+                feedback_summary = best_feedback
+                break
             else:
-                # Judge all unique responses
-                if remaining_retries > 0:
-                    judge_results = await self.ranking_judge.aforward(
-                        instruction=instruction,
-                        predictions=unique_responses
-                    )
-
-                    # Find the best response (rank 1)
-                    best_prediction_idx = None
-                    best_rank = float('inf')
-                    is_best_correct = False
-                    best_feedback = None
-
-                    for idx, resp in enumerate(unique_responses):
-                        result_key = list(judge_results.keys())[idx]
-                        judge_result = judge_results[result_key]
-                        rank = judge_result.get("rank", idx + 1)
-                        is_correct = judge_result.get("is_correct", "no").lower() in ["yes", "true", "correct"]
-                        feedback = judge_result.get("feedback", "No feedback")
-
-                        if rank < best_rank:
-                            best_rank = rank
-                            best_prediction_idx = idx
-                            is_best_correct = is_correct
-                            best_feedback = feedback
-
-                    execution_trace.append({
-                        "round": self.max_retries - remaining_retries + 1,
-                        "attempts": len(responses),
-                        "unique_responses": len(unique_responses),
-                        "best_response": unique_responses[best_prediction_idx],
-                        "judge_verdict": "correct" if is_best_correct else "incorrect",
-                        "judge_rank": best_rank,
-                        "judge_feedback": best_feedback,
-                        "approved": is_best_correct,
-                        "all_results": [{
-                            "response": resp,
-                            "rank": results.get("rank", idx + 1),
-                            "is_correct": results.get("is_correct", "no"),
-                            "feedback": results.get("feedback", "No feedback")
-                        } for idx, (resp, results) in enumerate(zip(unique_responses, judge_results.values()))]
-                    })
-
-                    if is_best_correct:
-                        final_result = unique_responses[best_prediction_idx]
-                        break
-                    else:
-                        # Combine feedback from all responses
-                        all_feedbacks = [
-                            f"- {resp[:50]}...: {results.get('feedback', 'No feedback')}" 
-                            for resp, results in zip(unique_responses, judge_results.values())
-                        ]
-                        feedback_summary = "\n".join(all_feedbacks)
+                # Combine feedback from all responses for the next retry.
+                if len(unique_responses) == 1:
+                    # Preserve simple feedback behavior for the single-response case.
+                    feedback_summary = best_feedback
                 else:
-                    # Last attempt, just pick the best ranked response
-                    final_result = unique_responses[0]
+                    feedback_summary = "\n".join(
+                        [
+                            f"- Response {result_idx + 1}:\n{result['response']}\nFeedback {result_idx + 1}:\n{result['feedback']}"
+                            for result_idx, result in enumerate(all_results)
+                        ]
+                    )
 
             remaining_retries -= 1
 
@@ -198,7 +173,7 @@ class ChainOfThoughtWithRankingJudgeAndFeedback(Module):
             else:
                 final_result = responses[0]
 
-            logger.warning(f"All {self.max_retries + 1} rounds failed, using last best result")
+            logger.warning(f"All {self.max_retries} rounds failed, using last best result")
 
         # Get the reasoning from the best response
         best_response_idx = responses.index(final_result) if final_result in responses else 0

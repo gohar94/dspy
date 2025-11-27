@@ -31,15 +31,17 @@ class ChainOfThoughtWithRankingJudge(Module):
     4. Otherwise, use the ranking judge to rank them and select the best (rank 1)
     """
 
-    def __init__(self, n: int = 3):
+    def __init__(self, n: int = 3, temperature: float = 1.0):
         """
         Initialize the ChainOfThoughtWithRankingJudge module.
 
         Args:
             n: Number of responses to sample (default: 3)
+            temperature: Temperature for the model (default: 1.0)
         """
         super().__init__()
         self.n = n
+        self.temperature = temperature
 
         # Initialize the components
         self.chain_of_thought = ChainOfThought("instruction -> response")
@@ -56,7 +58,7 @@ class ChainOfThoughtWithRankingJudge(Module):
         response_predictions = []
 
         for idx, rid in enumerate(rollout_ids):
-            lm_ = lm.copy(rollout_id=rid, temperature=0.6)
+            lm_ = lm.copy(rollout_id=rid, temperature=self.temperature)
             cot = self.chain_of_thought.deepcopy()
             cot.set_lm(lm_)
 

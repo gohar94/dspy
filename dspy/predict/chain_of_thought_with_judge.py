@@ -48,8 +48,8 @@ class ChainOfThoughtWithJudge(Module):
         final_result = None
         execution_trace = []
         feedback = None
+        remaining_retries = self.max_retries
 
-        remaining_retries = self.max_retries + 1
         while remaining_retries > 0:
             if remaining_retries == self.max_retries:
                 # First attempt - no feedback
@@ -59,36 +59,35 @@ class ChainOfThoughtWithJudge(Module):
                 enhanced_instruction = f"{instruction}\n\nPrevious attempt feedback: {feedback}"
                 cot_result = await self.chain_of_thought.aforward(instruction=enhanced_instruction)
 
-            remaining_retries -= 1
-
             # Judge the result
-            if remaining_retries > 0:
-                judge_result = await self.judge.aforward(
-                    instruction=instruction,
-                    prediction=cot_result.response
-                )
+            judge_result = await self.judge.aforward(
+                instruction=instruction,
+                prediction=cot_result.response
+            )
 
-                # Check if the judge approves
-                is_correct = judge_result.is_correct.lower() in ["yes", "true", "correct"]
+            # Check if the judge approves
+            is_correct = judge_result.is_correct.lower() in ["yes", "true", "correct"]
 
-                execution_trace.append({
-                    "attempt": self.max_retries - remaining_retries + 1,
-                    "response": cot_result.response,
-                    "judge_verdict": judge_result.is_correct,
-                    "judge_feedback": judge_result.feedback,
-                    "approved": is_correct
-                })
+            execution_trace.append({
+                "attempt": self.max_retries - remaining_retries + 1,
+                "response": cot_result.response,
+                "judge_verdict": judge_result.is_correct,
+                "judge_feedback": judge_result.feedback,
+                "approved": is_correct
+            })
 
-                if is_correct:
-                    final_result = cot_result.response
-                    break
-                else:
-                    feedback = judge_result.feedback
+            if is_correct:
+                final_result = cot_result.response
+                break
+            else:
+                feedback = judge_result.feedback
+
+            remaining_retries -= 1
 
         # If all attempts failed, use the last result
         if final_result is None:
             final_result = cot_result.response
-            logger.warning(f"All {self.max_retries + 1} attempts failed, using last result")
+            logger.warning(f"All {self.max_retries} attempts failed, using last result")
 
         # Create the prediction with full trace
         prediction = Prediction(

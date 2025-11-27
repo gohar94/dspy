@@ -107,21 +107,12 @@ class ChatAdapter(Adapter):
         suffix: str = "",
         main_request: bool = False,
     ) -> str:
-        from dspy.dsp.utils.settings import settings
-
         messages = [prefix]
         for k, v in signature.input_fields.items():
             if k in inputs:
                 value = inputs.get(k)
                 formatted_field_value = format_field_value(field_info=v, value=value)
                 messages.append(f"[[ ## {k} ## ]]\n{formatted_field_value}")
-
-        # Special handling for judge feedback field
-        judge_feedback_field = getattr(settings, "judge_feedback_field", "judge_feedback")
-        if judge_feedback_field and judge_feedback_field in inputs and judge_feedback_field not in signature.input_fields:
-            feedback_value = inputs.get(judge_feedback_field)
-            if feedback_value:
-                messages.append(f"[[ ## {judge_feedback_field} ## ]]\n{feedback_value}")
 
         if main_request:
             output_requirements = self.user_message_output_requirements(signature)
